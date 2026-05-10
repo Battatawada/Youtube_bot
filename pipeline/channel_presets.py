@@ -9,35 +9,182 @@ from __future__ import annotations
 from typing import TypedDict
 
 
-class ChannelPreset(TypedDict):
+class Variant(TypedDict, total=False):
+    """One output variant — same images, different audio/subs/upload target."""
+    lang: str  # "en", "hi", etc. used as key in Groq response
+    label: str  # human-readable for logs
+    tts_voice: str  # Edge TTS voice (e.g. "hi-IN-MadhurNeural")
+    caption_font: str  # font filename inside assets/fonts/
+    caption_font_name: str  # FFmpeg-visible font family name
+    yt_token_env: str  # env var name for YouTube refresh token (e.g. "YT_REFRESH_TOKEN_HI")
+    min_words: int  # min word count for narration validation
+
+
+class ChannelPreset(TypedDict, total=False):
     id: str
     label: str
     groq_system_hint: str
     segment_count: int  # images + script beats
     topic_pool: list[str]
+    image_style_suffix: str  # appended to every image prompt
+    image_negative_prompt: str  # passed as negative prompt
+    # Single-variant fields (backward compat — used when `variants` is absent):
+    language: str
+    tts_voice: str
+    caption_font: str
+    caption_font_name: str
+    # Multi-variant mode — Groq returns translations for each lang, pipeline renders+uploads per variant.
+    variants: list[Variant]
 
 
 PRESETS: dict[str, ChannelPreset] = {
     "facts": {
         "id": "facts",
-        "label": "5 interesting facts (general)",
+        "label": "Mind-blowing facts Short (bilingual — Hindi + English)",
+        "variants": [
+            {
+                "lang": "hi",
+                "label": "Hindi",
+                "tts_voice": "hi-IN-MadhurNeural",
+                "caption_font": "NotoSansDevanagari-Bold.ttf",
+                "caption_font_name": "Noto Sans Devanagari",
+                "yt_token_env": "YT_REFRESH_TOKEN_HI",
+                "min_words": 50,
+            },
+            {
+                "lang": "en",
+                "label": "English",
+                "tts_voice": "en-US-GuyNeural",
+                "caption_font": "BebasNeue-Regular.ttf",
+                "caption_font_name": "Bebas Neue",
+                "yt_token_env": "YT_REFRESH_TOKEN_EN",
+                "min_words": 80,
+            },
+        ],
         "groq_system_hint": (
-            "You write punchy YouTube Shorts. Niche: surprising facts, curious trivia. "
-            "Tone: energetic but clear, no clickbait lies. Each fact must be broadly accurate; "
-            "if unsure, pick safer wording. No hashtags inside narration."
+            "You write punchy YouTube Shorts about surprising, verified facts — in MULTIPLE languages. "
+            "The same fact will be published as separate videos on different language channels. "
+            "STRUCTURE: hook fact in opening, supporting facts in the middle, punchline + takeaway at end. "
+            "TONE: energetic, curious, confident. No clickbait lies. "
+            "Each fact must be broadly accurate; if unsure, use safer wording like "
+            "'scientists believe' or 'some research suggests'. "
+            "No medical advice. No hashtags inside narration. Original phrasing only. "
+            "IMAGE PROMPT RULE: write image prompts in ENGLISH only. Describe real photographs or documentary stills. "
+            "Use real-world subjects, real lighting, real environments. NEVER write 'cartoon', 'illustration', "
+            "'anime', or 'stylized'. Examples: 'a real octopus underwater in clear blue ocean, sunlight rays', "
+            "'close-up macro photo of a honeybee on a yellow flower', "
+            "'wide shot of Saturn V rocket launching at night with flames'. "
+            "BILINGUAL RULE: the SAME story/facts must be expressed naturally in each language — "
+            "do not literally translate word-for-word; rephrase so each version sounds native and flows well."
         ),
         "segment_count": 5,
+        "image_style_suffix": (
+            ", photorealistic documentary photography, cinematic lighting, ultra detailed, "
+            "8k, sharp focus, professional camera, National Geographic style, realistic textures, "
+            "natural colors, depth of field, no text, no captions, no watermark, no logos"
+        ),
+        "image_negative_prompt": (
+            "cartoon, anime, illustration, painting, drawing, sketch, 3d render, cgi, "
+            "stylized, flat colors, low quality, blurry, watermark, logo, text, signature, "
+            "deformed, ugly, extra limbs, mutated"
+        ),
         "topic_pool": [
-            "surprising facts about the human body",
-            "strange facts about the ocean",
-            "weird space facts",
-            "unusual animal abilities",
-            "mind-blowing food facts",
-            "bizarre historical coincidences",
-            "everyday objects with strange origins",
-            "unexplained natural phenomena",
-            "surprising facts about sleep",
-            "weird facts about money",
+            # Space & Universe
+            "black holes", "neutron stars", "Mars mysteries", "Moon secrets", "exoplanets",
+            "the Big Bang", "dark matter", "the asteroid belt", "Saturn's rings",
+            "Jupiter's storms", "sounds in space", "dead stars", "parallel universes",
+            "time dilation", "cosmic radiation", "space colonies", "SETI and alien signals",
+            "the Voyager probe", "sun facts", "galaxy collisions", "space weather",
+            "quantum physics weirdness", "multiverse theory", "wormholes",
+            "the edge of the observable universe",
+            # Animals & Nature
+            "deep sea creatures", "parasites that control minds", "animal superpowers",
+            "extinct animals", "animals that basically can't die",
+            "venomous creatures of India", "crow intelligence", "the octopus brain",
+            "the mantis shrimp", "tardigrades", "animal sleep habits", "migration mysteries",
+            "camouflage masters", "animals that mourn their dead", "bioluminescence",
+            "carnivorous plants", "fungi intelligence", "ant colonies", "whale communication",
+            "spider silk science", "the immortal jellyfish", "animal self-medication",
+            "dolphin language", "electric eels", "naked mole rats", "bird navigation",
+            "snake facts", "insects you didn't know exist", "animals in Indian forests",
+            "microorganisms living in your body",
+            # Human Body & Psychology
+            "brain illusions", "the science of sleep paralysis", "memory tricks",
+            "the placebo effect", "pain tolerance", "human senses you didn't know about",
+            "DNA secrets", "the gut-brain connection", "adrenaline effects",
+            "the subconscious mind", "phobias explained", "the science of dreams",
+            "body language secrets", "why we laugh", "human evolution oddities",
+            "the science of aging", "near-death experiences", "hypnosis facts",
+            "déjà vu explained", "emotional memory", "synesthesia", "muscle memory",
+            "the fear response", "the science of addiction", "human body record breakers",
+            # History & Civilizations
+            "Ancient Egypt secrets", "dark facts about the Roman Empire", "lost civilizations",
+            "medieval torture devices", "ancient Indian empires", "Mughal secrets",
+            "forgotten inventions", "unknown facts about World War 2", "Cold War spy stories",
+            "Greek myths debunked", "real Viking history", "the Aztec civilization",
+            "the Indus Valley mystery", "the Maurya Empire", "the Chola naval empire",
+            "the history of slavery", "ancient medicines", "the oldest cities on Earth",
+            "ancient trade routes", "Genghis Khan facts", "the real Cleopatra",
+            "Alexander the Great", "dark facts about British India",
+            "untold partition of India stories", "ancient Chinese secrets",
+            "the real life of samurai", "real pirate history", "the Byzantine Empire",
+            "the Ottoman Empire", "ancient astronomy",
+            # India Specific
+            "India's unsolved mysteries", "cursed places in India",
+            "unknown Indian inventions", "weird Indian laws",
+            "dark stories from Indian mythology", "haunted forts of India",
+            "untold Indian freedom fighters", "India's richest kings in history",
+            "origin stories of Indian street food", "India's rarest animals",
+            "Indian space program facts", "the engineering of ancient temples",
+            "India's tribal cultures", "Bollywood dark secrets",
+            "India's geographical oddities", "mysteries of Indian rivers",
+            "Indian martial arts", "underground cities of India",
+            "India's hottest and coldest places", "facts about Indian languages",
+            # Money & Power
+            "the richest people in history", "how billionaires think",
+            "the dark side of corporations", "famous stock market crashes",
+            "consequences of money printing", "heists gone wrong",
+            "underground economies", "tax havens explained",
+            "the richest countries in history", "failed currencies",
+            "the gold standard", "dark stories from crypto", "the mafia economy",
+            "war profiteering", "untold stories of India's richest businessmen",
+            "how banks really work", "money psychology", "poverty traps",
+            "famous economic collapses", "the dark side of diamonds",
+            # Science & Tech
+            "when AI went wrong", "internet dark secrets", "nuclear energy facts",
+            "genetic engineering", "CRISPR experiments", "lab-grown meat",
+            "deepfake technology", "social media algorithms", "dark web facts",
+            "surveillance technology", "robot evolution", "battery technology secrets",
+            "shocking climate science facts", "plastic in the human body",
+            "microwave radiation", "5G facts vs myths", "quantum computing",
+            "the history of bioweapons", "chemical reactions gone wrong",
+            "future technology predictions",
+            # Food & Substances
+            "foods your brain is addicted to", "the dark side of sugar",
+            "fast food secrets", "spices that changed history",
+            "poisonous foods we eat daily", "the science of fermentation",
+            "caffeine deep dive", "the science of alcohol",
+            "the spiciest things on Earth", "food frauds worldwide",
+            "ancient recipes still used today", "rare foods only the rich eat",
+            "the history of Indian spices", "foods banned around the world",
+            "GMO food facts",
+            # Crime & Dark Secrets
+            "unsolved murders", "serial killer psychology",
+            "cults that shocked the world", "government experiments on humans",
+            "corporate cover-ups", "art heists", "counterfeit economies",
+            "organized crime facts", "famous prison escapes",
+            "cold cases solved by DNA", "the biggest cyber crimes ever",
+            "assassination plots", "whistleblower stories",
+            "the dark side of Hollywood", "scams that fooled millions",
+            "human trafficking networks", "drug cartel economics",
+            "facts about corrupt governments", "identity theft stories",
+            "history of con artists",
+            # Wildcards
+            "dreams that predicted the future", "coincidences too weird to be real",
+            "things banned in other countries", "phobias with unpronounceable names",
+            "world records that sound fake", "the science of optical illusions",
+            "superstitions with real origins", "things that didn't exist 20 years ago",
+            "urban legends debunked", "numbers with dark histories",
         ],
     },
     "school_story": {
@@ -118,6 +265,17 @@ PRESETS: dict[str, ChannelPreset] = {
             "All stories fictional. Original characters. PG-13. No hashtags in narration."
         ),
         "segment_count": 6,
+        "image_style_suffix": (
+            ", dark spooky cartoon illustration, eerie atmosphere, creepy stylized art, "
+            "bold outlines, muted haunting colors, horror cartoon aesthetic, ghostly shadows, "
+            "dramatic lighting, sinister mood, professional youtube thumbnail quality, "
+            "no text, no captions, no watermark, no logos"
+        ),
+        "image_negative_prompt": (
+            "photorealistic, photograph, happy cheerful bright, anime eyes, blurry, "
+            "low quality, watermark, logo, text, title, signature, ugly, grainy, "
+            "gore, blood, nudity, child-unsafe"
+        ),
         "topic_pool": [
             "a ghost haunting an empty school at night",
             "a strange presence in a family home",

@@ -21,11 +21,18 @@ SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 
-def _creds_from_env() -> Credentials | None:
-    """Reconstruct credentials from GitHub Actions secrets."""
+def _creds_from_env(refresh_token_env: str = "YT_REFRESH_TOKEN") -> Credentials | None:
+    """Reconstruct credentials from GitHub Actions secrets.
+
+    The client_id/secret are shared (same OAuth app authorizes multiple channels),
+    but each YouTube channel has its own refresh token stored under a distinct env var name.
+    """
     client_id = os.environ.get("YT_CLIENT_ID", "").strip()
     client_secret = os.environ.get("YT_CLIENT_SECRET_VALUE", "").strip()
-    refresh_token = os.environ.get("YT_REFRESH_TOKEN", "").strip()
+    refresh_token = os.environ.get(refresh_token_env, "").strip()
+    # Fallback to the default token if a channel-specific one is empty
+    if not refresh_token and refresh_token_env != "YT_REFRESH_TOKEN":
+        refresh_token = os.environ.get("YT_REFRESH_TOKEN", "").strip()
     if not (client_id and client_secret and refresh_token):
         return None
     return Credentials(
@@ -59,21 +66,21 @@ def _creds_from_files(client_secret_path: Path, token_path: Path) -> Credentials
     return creds
 
 
-def _get_creds() -> Credentials:
-    creds = _creds_from_env()
+def _get_creds(refresh_token_env: str = "YT_REFRESH_TOKEN") -> Credentials:
+    creds = _creds_from_env(refresh_token_env)
     if creds:
         try:
             creds.refresh(Request())
         except RefreshError as e:
             raise RuntimeError(
-                "\n\n❌ YT_REFRESH_TOKEN is invalid or expired.\n"
+                f"\n\n❌ {refresh_token_env} is invalid or expired.\n"
                 "   Common cause: OAuth consent screen is in 'Testing' mode "
                 "(tokens expire after 7 days).\n\n"
                 "   FIX:\n"
                 "   1. Go to https://console.cloud.google.com/apis/credentials/consent\n"
                 "      → click PUBLISH APP (ignore the 'Needs verification' warning).\n"
                 "   2. Regenerate locally:  python scripts/youtube_auth.py\n"
-                "   3. Update GitHub secret YT_REFRESH_TOKEN with the new value.\n\n"
+                f"   3. Update GitHub secret {refresh_token_env} with the new value.\n\n"
                 f"   Underlying error: {e}"
             ) from e
         return creds
@@ -89,9 +96,14 @@ def upload_short(
     *,
     privacy_status: str = "private",
     category_id: str = "24",
+    refresh_token_env: str = "YT_REFRESH_TOKEN",
 ) -> str:
-    """Upload and return YouTube video ID."""
-    creds = _get_creds()
+    """Upload and return YouTube video ID.
+
+    Pass `refresh_token_env` to target a different channel (e.g. "YT_REFRESH_TOKEN_HI").
+    Falls back to YT_REFRESH_TOKEN if the named env var is unset.
+    """
+    creds = _get_creds(refresh_token_env)
     youtube = build("youtube", "v3", credentials=creds)
 
     body = {

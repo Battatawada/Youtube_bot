@@ -1,4 +1,9 @@
-"""Groq (OpenAI-compatible) — generate Short script + image prompts as JSON."""
+"""Groq (OpenAI-compatible) — generate Short script + image prompts as JSON.
+
+Supports two modes:
+  • Single-language preset (legacy): returns full_narration, youtube_title, etc.
+  • Multi-variant preset (bilingual): returns image_prompts once + variants[lang] = {title, desc, narration}.
+"""
 from __future__ import annotations
 
 import json
@@ -11,6 +16,17 @@ from pipeline.channel_presets import ChannelPreset
 from pipeline.story_history import history_prompt_block
 
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+
+# ── Language-specific word-count guidance ──────────────────────────────
+LANG_WORD_TARGETS = {
+    "en": (120, 150, "120-150 English words (35-45 sec spoken)"),
+    "hi": (85, 105, "85-105 Devanagari Hindi words (35-40 sec spoken — Hindi reads slower)"),
+}
+
+
+def _lang_label(lang: str) -> str:
+    return {"en": "English", "hi": "Hindi (Devanagari script)"}.get(lang, lang)
 
 
 def generate_short_pack(
@@ -34,27 +50,169 @@ def generate_short_pack(
             user += anti_repeat
 
     n = preset["segment_count"]
+    variants = preset.get("variants") or []
+
+    if variants:
+        return _generate_multivariant(preset, user, n, variants)
+    return _generate_single(preset, user, n)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Single-language path (backward compat for ghost_stories, school_story, etc.)
+# ─────────────────────────────────────────────────────────────────────────
+def _generate_single(preset: ChannelPreset, user: str, n: int) -> dict[str, Any]:
+    language = (preset.get("language") or "en").lower()
+    lo, hi, blurb = LANG_WORD_TARGETS.get(language, LANG_WORD_TARGETS["en"])
+
+    if language == "hi":
+        narration_rule = (
+            '"full_narration": "COMPLETE narration as ONE continuous paragraph in Devanagari Hindi. '
+            f'This is what the voice will read aloud. MUST be {blurb}. '
+            'Natural spoken Hindi — no segment markers, no numbering, no English transliteration."'
+        )
+        strict_extra = (
+            "- LANGUAGE: full_narration, youtube_title, and youtube_description MUST be in Devanagari Hindi.\n"
+            "- image_prompts MUST be in ENGLISH (the image model does not understand Hindi).\n"
+            f"- WORD COUNT: full_narration MUST contain {lo}-{hi} Hindi words.\n"
+        )
+    else:
+        narration_rule = (
+            '"full_narration": "COMPLETE story/script as one continuous paragraph. This is what the voice will read. '
+            f'Must be {blurb}. Natural narration — no segment breaks, no numbering."'
+        )
+        strict_extra = f"- full_narration is ONE continuous paragraph, {lo}-{hi} English words.\n"
+
     user += f"""
 Return ONLY valid JSON with this shape:
 {{
   "youtube_title": "short catchy title, under 90 chars, no hashtags",
   "youtube_description": "2-3 sentences plus optional #Shorts at end",
-  "full_narration": "The COMPLETE story/script as one continuous paragraph. This is what the voice will read. Must be 120-150 words (35-45 seconds when read aloud at normal pace). Write it as natural spoken narration — no segment breaks, no numbering.",
+  {narration_rule},
   "image_prompts": [
-    "visual description for image 1: setting, characters, action. No style words. No text in image.",
+    "visual description for image 1: setting, subject, action. No style words. No text in image.",
     "visual description for image 2...",
     "..."
   ]
 }}
 
 STRICT RULES:
-- "full_narration" is ONE continuous paragraph, 120-150 words total. This is critical for audio length.
-- "image_prompts" array MUST have exactly {n} entries.
-- Each image_prompt should match a different moment/beat of the story in order.
+{strict_extra}- "image_prompts" array MUST have exactly {n} entries.
+- Each image_prompt matches a different moment/beat in order.
 - Image prompts are just visuals — no narration text, no style words, no quotes.
 - The narration must flow naturally as one spoken piece (no "segment 1", "segment 2" etc).
 """
 
+    data = _call_groq(preset, user)
+
+    narration = data.get("full_narration", "").strip()
+    if not narration:
+        raise ValueError("Missing full_narration")
+
+    prompts = data.get("image_prompts")
+    if not isinstance(prompts, list) or len(prompts) != n:
+        raise ValueError(f"Expected {n} image_prompts, got {len(prompts or [])}")
+    for i, p in enumerate(prompts):
+        if not isinstance(p, str) or not p.strip():
+            raise ValueError(f"image_prompt {i} is empty")
+
+    word_count = len(narration.split())
+    min_words = 50 if language == "hi" else 80
+    if word_count < min_words:
+        raise ValueError(
+            f"Narration too short ({word_count} words, expected ≥ {min_words} for {language})"
+        )
+
+    return data
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Multi-variant path (one Groq call returns every language's narration)
+# ─────────────────────────────────────────────────────────────────────────
+def _generate_multivariant(
+    preset: ChannelPreset, user: str, n: int, variants: list,
+) -> dict[str, Any]:
+    # Build the per-language requirement lines
+    lang_lines = []
+    for v in variants:
+        lang = v["lang"]
+        lo, hi, blurb = LANG_WORD_TARGETS.get(lang, LANG_WORD_TARGETS["en"])
+        lang_lines.append(
+            f'    "{lang}": {{\n'
+            f'      "youtube_title": "catchy title in {_lang_label(lang)} (<90 chars, no hashtags)",\n'
+            f'      "youtube_description": "2-3 sentences in {_lang_label(lang)} + optional #Shorts",\n'
+            f'      "full_narration": "ONE continuous paragraph in {_lang_label(lang)}. '
+            f'{blurb}. Natural spoken narration, no segment markers."\n'
+            f'    }}'
+        )
+    variants_block = ",\n".join(lang_lines)
+
+    word_targets = "\n".join(
+        f"  - {_lang_label(v['lang'])}: {LANG_WORD_TARGETS.get(v['lang'], LANG_WORD_TARGETS['en'])[2]}"
+        for v in variants
+    )
+    lang_keys = ", ".join(f'"{v["lang"]}"' for v in variants)
+
+    user += f"""
+Return ONLY valid JSON with this shape:
+{{
+  "image_prompts": [
+    "visual description for image 1 — IN ENGLISH ONLY: setting, subject, action. No style words. No text in image.",
+    "visual description for image 2 — in English…",
+    "..."
+  ],
+  "variants": {{
+{variants_block}
+  }}
+}}
+
+STRICT RULES:
+- "image_prompts" array MUST have exactly {n} entries, ALL in English.
+- "variants" object MUST contain keys: {lang_keys}.
+- Each variant tells the SAME facts/story but written natively in that language (not literal translation).
+- Word-count targets per language:
+{word_targets}
+- Narrations are continuous spoken paragraphs — no segment numbers, no headings.
+- Titles/descriptions: each in its own language.
+"""
+
+    data = _call_groq(preset, user)
+
+    prompts = data.get("image_prompts")
+    if not isinstance(prompts, list) or len(prompts) != n:
+        raise ValueError(f"Expected {n} image_prompts, got {len(prompts or [])}")
+    for i, p in enumerate(prompts):
+        if not isinstance(p, str) or not p.strip():
+            raise ValueError(f"image_prompt {i} is empty")
+
+    vmap = data.get("variants")
+    if not isinstance(vmap, dict):
+        raise ValueError("Groq response missing 'variants' object")
+
+    for v in variants:
+        lang = v["lang"]
+        node = vmap.get(lang)
+        if not isinstance(node, dict):
+            raise ValueError(f"variants['{lang}'] missing")
+
+        narration = (node.get("full_narration") or "").strip()
+        if not narration:
+            raise ValueError(f"variants['{lang}'].full_narration empty")
+
+        min_words = v.get("min_words", 50 if lang == "hi" else 80)
+        word_count = len(narration.split())
+        if word_count < min_words:
+            raise ValueError(
+                f"variants['{lang}'].full_narration too short "
+                f"({word_count} words, expected ≥ {min_words})"
+            )
+
+        if not (node.get("youtube_title") or "").strip():
+            raise ValueError(f"variants['{lang}'].youtube_title empty")
+
+    return data
+
+
+def _call_groq(preset: ChannelPreset, user: str) -> dict[str, Any]:
     client = Groq(api_key=os.environ["GROQ_API_KEY"])
     resp = client.chat.completions.create(
         model=GROQ_MODEL,
@@ -69,21 +227,4 @@ STRICT RULES:
     raw = resp.choices[0].message.content
     if not raw:
         raise RuntimeError("Empty Groq response")
-    data = json.loads(raw)
-
-    narration = data.get("full_narration", "").strip()
-    if not narration:
-        raise ValueError("Missing full_narration")
-
-    prompts = data.get("image_prompts")
-    if not isinstance(prompts, list) or len(prompts) != n:
-        raise ValueError(f"Expected {n} image_prompts, got {len(prompts or [])}")
-    for i, p in enumerate(prompts):
-        if not isinstance(p, str) or not p.strip():
-            raise ValueError(f"image_prompt {i} is empty")
-
-    word_count = len(narration.split())
-    if word_count < 80:
-        raise ValueError(f"Narration too short ({word_count} words, need 120-150)")
-
-    return data
+    return json.loads(raw)

@@ -2,16 +2,26 @@
 """
 Fully automated YouTube Short pipeline.
 
-  Groq → ONE full narration + image prompts
-  Edge TTS → ONE audio file (30-40s)
-  DeAPI → images (one per ~5-7s of audio)
-  Captions → SRT from narration chunks
-  FFmpeg → 9:16 vertical MP4 with small bottom captions
+Single-variant flow:
+  Groq → narration + image prompts
+  Edge TTS → audio (30-40s)
+  DeAPI → images
+  Captions → SRT
+  FFmpeg → 9:16 vertical MP4
   YouTube upload (optional)
+
+Bilingual flow (preset has `variants`):
+  Groq → image_prompts + per-language {title, description, narration}
+  DeAPI → images (once, shared)
+  For each variant:
+    Edge TTS → audio in that language with that voice
+    Captions → SRT
+    FFmpeg → MP4 with variant-specific font
+    YouTube upload (optional, per-channel token)
 
 Usage:
   .venv/bin/python scripts/run_short.py --channel ghost_stories
-  .venv/bin/python scripts/run_short.py --channel ghost_stories --topic "abandoned hospital" --upload
+  .venv/bin/python scripts/run_short.py --channel facts --upload --privacy public
 """
 from __future__ import annotations
 
@@ -40,6 +50,61 @@ from pipeline.render_short import render_vertical_short
 from pipeline.story_history import save_title
 
 
+def _render_and_upload(
+    *,
+    variant_label: str,
+    narration: str,
+    title: str,
+    description: str,
+    voice: str | None,
+    font_file: str,
+    font_name: str,
+    image_paths: list,
+    run_dir: Path,
+    suffix: str,
+    upload: bool,
+    privacy: str,
+    yt_token_env: str = "YT_REFRESH_TOKEN",
+) -> Path:
+    """Render one video (audio + SRT + MP4) for a single variant. Optionally upload."""
+    print(f"\n━━━ Variant: {variant_label} ━━━")
+
+    audio_path = run_dir / f"voiceover{suffix}.mp3"
+    print(f"② Edge TTS ({voice or 'default'})…")
+    total_dur, sentence_timings = synthesize_full(narration, audio_path, voice=voice)
+    print(f"   Audio: {total_dur:.1f}s ({len(sentence_timings)} sentences tracked)")
+    if total_dur > 55:
+        print(f"   ⚠ Audio is {total_dur:.0f}s — target is 30-45s")
+    if total_dur < 25:
+        print(f"   ⚠ Audio is {total_dur:.0f}s — might be too short")
+
+    srt_path = run_dir / f"captions{suffix}.srt"
+    print("④ Captions…")
+    build_srt(sentence_timings, srt_path, total_dur)
+
+    video_path = run_dir / f"short{suffix}.mp4"
+    print(f"⑤ FFmpeg: rendering 1080×1920 (font={font_name})…")
+    render_vertical_short(
+        image_paths, total_dur, audio_path, srt_path, video_path,
+        font_file=font_file, font_name=font_name,
+    )
+    print(f"   → {video_path}")
+
+    if upload:
+        from pipeline.youtube_upload import upload_short
+        print(f"⑥ YouTube: uploading ({yt_token_env})…")
+        vid = upload_short(
+            video_path, title, description,
+            privacy_status=privacy,
+            refresh_token_env=yt_token_env,
+        )
+        print(f"   Uploaded! https://www.youtube.com/shorts/{vid}")
+    else:
+        print("   (skip upload — pass --upload)")
+
+    return video_path
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Generate & optionally upload a YouTube Short.")
     ap.add_argument("--channel", required=True, choices=list_channel_ids())
@@ -62,41 +127,53 @@ def main() -> None:
             topic_hint = random.choice(pool)
             print(f"🎲 Random topic from pool: {topic_hint!r}")
 
+    variants = preset.get("variants") or []
+
     # ── 1. Script via Groq ───────────────────────────────────────────
     print("① Groq: generating script…")
     pack = generate_short_pack(
         preset, topic_hint=topic_hint, channel_id=args.channel,
     )
-    (run_dir / "script.json").write_text(json.dumps(pack, indent=2), encoding="utf-8")
+    (run_dir / "script.json").write_text(json.dumps(pack, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    title = pack["youtube_title"]
-    narration = pack["full_narration"]
     image_prompts = pack["image_prompts"]
-    word_count = len(narration.split())
-    print(f"   Title: {title}")
-    print(f"   Narration: {word_count} words, {len(image_prompts)} image prompts")
 
-    # ── 2. Edge TTS — ONE full audio ─────────────────────────────────
-    audio_path = run_dir / "voiceover.mp3"
-    print("② Edge TTS: full narration…")
-    total_dur, sentence_timings = synthesize_full(narration, audio_path)
-    print(f"   Audio: {total_dur:.1f}s ({len(sentence_timings)} sentences tracked)")
-    if total_dur > 55:
-        print(f"   ⚠ Audio is {total_dur:.0f}s — target is 30-45s")
-    if total_dur < 25:
-        print(f"   ⚠ Audio is {total_dur:.0f}s — might be too short")
+    if variants:
+        # Bilingual mode: each lang gets its own audio/SRT/video
+        first_v = variants[0]
+        first_node = pack["variants"][first_v["lang"]]
+        print(f"   Title ({first_v['label']}): {first_node['youtube_title']}")
+        for v in variants:
+            node = pack["variants"][v["lang"]]
+            wc = len(node["full_narration"].split())
+            print(f"   {v['label']}: {wc} words")
+        print(f"   {len(image_prompts)} image prompts (shared)")
+        history_title = first_node["youtube_title"]
+        history_narration = first_node["full_narration"]
+    else:
+        title = pack["youtube_title"]
+        narration = pack["full_narration"]
+        word_count = len(narration.split())
+        print(f"   Title: {title}")
+        print(f"   Narration: {word_count} words, {len(image_prompts)} image prompts")
+        history_title = title
+        history_narration = narration
 
-    # ── 3. Images via DeAPI ──────────────────────────────────────────
+    # ── 2. Images via DeAPI (generated ONCE, shared by all variants) ──
     w = int(os.environ.get("DEAPI_IMAGE_WIDTH", "768"))
     h = int(os.environ.get("DEAPI_IMAGE_HEIGHT", "768"))
-    negative = os.environ.get("IMAGE_NEGATIVE_PROMPT", DEFAULT_NEGATIVE)
+    style_suffix = preset.get("image_style_suffix")
+    negative = (
+        os.environ.get("IMAGE_NEGATIVE_PROMPT")
+        or preset.get("image_negative_prompt")
+        or DEFAULT_NEGATIVE
+    )
     cooldown = int(os.environ.get("DEAPI_COOLDOWN", "10"))
 
     print(f"③ Images: {len(image_prompts)} scenes ({cooldown}s cooldown)…")
-
     image_paths: list[Path] = []
     for i, ip in enumerate(image_prompts):
-        prompt = full_visual_prompt(ip)
+        prompt = full_visual_prompt(ip, style_suffix=style_suffix)
         out = img_dir / f"scene_{i + 1:02d}.png"
         st, detail = save_scene_image(i + 1, prompt, out, width=w, height=h, negative=negative)
         if st != "ok":
@@ -106,33 +183,44 @@ def main() -> None:
         if i < len(image_prompts) - 1:
             time.sleep(cooldown)
 
-    # ── 4. Captions (from real word timestamps) ────────────────────
-    print("④ Captions…")
-    srt_path = run_dir / "captions.srt"
-    build_srt(sentence_timings, srt_path, total_dur)
-
-    # ── 5. FFmpeg render (9:16) ──────────────────────────────────────
-    video_path = run_dir / "short.mp4"
-    print("⑤ FFmpeg: rendering 1080×1920…")
-    render_vertical_short(image_paths, total_dur, audio_path, srt_path, video_path)
-    print(f"   → {video_path}")
-
-    # ── 6. History ───────────────────────────────────────────────────
-    summary = " ".join(narration.split()[:25]) + "…"
-    save_title(args.channel, title, summary)
-
-    # ── 7. YouTube upload ────────────────────────────────────────────
-    if args.upload:
-        from pipeline.youtube_upload import upload_short
-
-        print("⑥ YouTube: uploading…")
-        vid = upload_short(
-            video_path, title, pack["youtube_description"],
-            privacy_status=args.privacy,
-        )
-        print(f"   Uploaded! https://www.youtube.com/shorts/{vid}")
+    # ── 4-6. Render (per variant) ────────────────────────────────────
+    if variants:
+        for v in variants:
+            node = pack["variants"][v["lang"]]
+            _render_and_upload(
+                variant_label=v["label"],
+                narration=node["full_narration"],
+                title=node["youtube_title"],
+                description=node.get("youtube_description", ""),
+                voice=v.get("tts_voice"),
+                font_file=v.get("caption_font", "CreepsterCaps.ttf"),
+                font_name=v.get("caption_font_name", "Creepster"),
+                image_paths=image_paths,
+                run_dir=run_dir,
+                suffix=f"_{v['lang']}",
+                upload=args.upload,
+                privacy=args.privacy,
+                yt_token_env=v.get("yt_token_env", "YT_REFRESH_TOKEN"),
+            )
     else:
-        print("   (skip upload — pass --upload after OAuth setup)")
+        _render_and_upload(
+            variant_label=preset.get("language", "en"),
+            narration=narration,
+            title=title,
+            description=pack.get("youtube_description", ""),
+            voice=preset.get("tts_voice") or os.environ.get("EDGE_TTS_VOICE"),
+            font_file=preset.get("caption_font", "CreepsterCaps.ttf"),
+            font_name=preset.get("caption_font_name", "Creepster"),
+            image_paths=image_paths,
+            run_dir=run_dir,
+            suffix="",
+            upload=args.upload,
+            privacy=args.privacy,
+        )
+
+    # ── 7. History ───────────────────────────────────────────────────
+    summary = " ".join(history_narration.split()[:25]) + "…"
+    save_title(args.channel, history_title, summary)
 
     print("\n✓ Done.")
 

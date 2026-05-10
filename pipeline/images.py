@@ -12,21 +12,19 @@ DEAPI_SUBMIT_URL = "https://api.deapi.ai/api/v1/client/txt2img"
 DEAPI_POLL_URL = "https://api.deapi.ai/api/v1/client/request-status"
 
 STYLE_SUFFIX = (
-    ", dark spooky cartoon illustration, eerie atmosphere, creepy stylized art, "
-    "bold outlines, muted haunting colors, horror cartoon aesthetic, ghostly shadows, "
-    "dramatic lighting, sinister mood, professional youtube thumbnail quality, "
-    "no text, no captions, no watermark, no logos"
+    ", cinematic digital illustration, detailed scene art, strong composition, "
+    "professional youtube visual quality, no text, no captions, no watermark, no logos"
 )
 
 DEFAULT_NEGATIVE = (
-    "photorealistic, photograph, happy cheerful bright, anime eyes, blurry, "
-    "low quality, watermark, logo, text, title, signature, ugly, grainy, "
+    "blurry, low quality, watermark, logo, text, title, signature, ugly, grainy, "
     "gore, blood, nudity, child-unsafe"
 )
 
 
-def full_visual_prompt(scene: str) -> str:
-    return f"{scene.strip()}{STYLE_SUFFIX}"
+def full_visual_prompt(scene: str, style_suffix: str | None = None) -> str:
+    """Combine the scene description with a channel-specific style suffix."""
+    return f"{scene.strip()}{(style_suffix or STYLE_SUFFIX)}"
 
 
 def _deapi_generate(

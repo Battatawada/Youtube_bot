@@ -12,7 +12,9 @@ import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CREEPY_FONT = REPO_ROOT / "assets" / "fonts" / "CreepsterCaps.ttf"
+FONTS_DIR = REPO_ROOT / "assets" / "fonts"
+DEFAULT_FONT_FILE = "CreepsterCaps.ttf"
+DEFAULT_FONT_NAME = "Creepster"
 
 FPS = 30
 FADE_DUR = 0.5
@@ -28,6 +30,8 @@ def render_vertical_short(
     *,
     width: int = 1080,
     height: int = 1920,
+    font_file: str = DEFAULT_FONT_FILE,
+    font_name: str = DEFAULT_FONT_NAME,
 ) -> None:
     if not image_paths:
         raise ValueError("No images")
@@ -90,17 +94,20 @@ def render_vertical_short(
     # ── 3. Prepare subtitles + font ──────────────────────────────────
     shutil.copyfile(srt_path, tmp / "captions.srt")
 
-    font_name = "Arial"
+    font_path = FONTS_DIR / font_file
+    rendered_font_name = "Arial"
     fontsdir_arg = ""
-    if CREEPY_FONT.is_file():
+    if font_path.is_file():
         font_dir = tmp / "_fonts"
         font_dir.mkdir(exist_ok=True)
-        shutil.copyfile(CREEPY_FONT, font_dir / CREEPY_FONT.name)
-        font_name = "Creepster"
+        shutil.copyfile(font_path, font_dir / font_path.name)
+        rendered_font_name = font_name
         fontsdir_arg = ":fontsdir='_fonts'"
+    else:
+        print(f"   ⚠ Font {font_path} not found — using {rendered_font_name}")
 
     force_style = (
-        f"FontName={font_name},"
+        f"FontName={rendered_font_name},"
         f"FontSize=18,"
         f"PrimaryColour=&H00FFFFFF,"
         f"OutlineColour=&H00000000,"
