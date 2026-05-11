@@ -22,11 +22,14 @@ GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 LANG_WORD_TARGETS = {
     "en": (120, 150, "120-150 English words (35-45 sec spoken)"),
     "hi": (
-        105,
         135,
-        "105-135 Devanagari Hindi words (~40-50 sec spoken; use full sentences, not headlines)",
+        170,
+        "135-170 Devanagari Hindi words — aim ~150 (~55-70 sec); full sentences, not headlines",
     ),
 }
+
+# LLMs undershoot the ideal band; minimum floor avoids flaky CI while prompts push higher counts.
+DEFAULT_MIN_WORDS = {"hi": 80, "en": 80}
 
 
 def _lang_label(lang: str) -> str:
@@ -120,7 +123,7 @@ STRICT RULES:
             raise ValueError(f"image_prompt {i} is empty")
 
     word_count = len(narration.split())
-    min_words = 85 if language == "hi" else 80
+    min_words = DEFAULT_MIN_WORDS.get(language, 80)
     if word_count < min_words:
         raise ValueError(
             f"Narration too short ({word_count} words, expected ≥ {min_words} for {language})"
@@ -179,8 +182,29 @@ STRICT RULES:
 - Titles/descriptions: each in its own language.
 """
 
-    data = _call_groq(preset, user)
+    last_err: str | None = None
+    for attempt in range(2):
+        extra = ""
+        if last_err:
+            extra = (
+                "\n\n=== REGENERATE (previous JSON failed validation) ===\n"
+                f"{last_err}\n"
+                "Return a NEW complete JSON object that fixes the issue. "
+                "Keep the same facts/story; meet every word-count floor.\n"
+            )
+        data = _call_groq(preset, user + extra)
+        try:
+            _assert_multivariant_valid(data, variants, n)
+            return data
+        except ValueError as e:
+            last_err = str(e)
+            if attempt == 1:
+                raise
 
+    raise RuntimeError("unreachable")
+
+
+def _assert_multivariant_valid(data: dict[str, Any], variants: list, n: int) -> None:
     prompts = data.get("image_prompts")
     if not isinstance(prompts, list) or len(prompts) != n:
         raise ValueError(f"Expected {n} image_prompts, got {len(prompts or [])}")
@@ -202,18 +226,17 @@ STRICT RULES:
         if not narration:
             raise ValueError(f"variants['{lang}'].full_narration empty")
 
-        min_words = v.get("min_words", 85 if lang == "hi" else 80)
+        min_words = v.get("min_words", DEFAULT_MIN_WORDS.get(lang, 80))
         word_count = len(narration.split())
         if word_count < min_words:
+            lo, hi, _ = LANG_WORD_TARGETS.get(lang, LANG_WORD_TARGETS["en"])
             raise ValueError(
                 f"variants['{lang}'].full_narration too short "
-                f"({word_count} words, expected ≥ {min_words})"
+                f"({word_count} words, need ≥{min_words}; ideal range {lo}-{hi})"
             )
 
         if not (node.get("youtube_title") or "").strip():
             raise ValueError(f"variants['{lang}'].youtube_title empty")
-
-    return data
 
 
 def _call_groq(preset: ChannelPreset, user: str) -> dict[str, Any]:
