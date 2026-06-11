@@ -131,14 +131,29 @@ def save_scene_image(
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        img_bytes = _deapi_generate(
-            prompt,
-            api_key=api_key,
-            width=width,
-            height=height,
-            model=model,
-        )
+        img_bytes = None
+
+        for attempt in range(3):
+            try:
+                img_bytes = _deapi_generate(
+                    prompt,
+                    api_key=api_key,
+                    width=width,
+                    height=height,
+                    model=model,
+                )
+                break
+
+            except Exception as e:
+                print(f"Retry {attempt + 1}/3: {e}")
+
+                if attempt == 2:
+                    raise
+
+                time.sleep(10)
+
         out_path.write_bytes(img_bytes)
         return "ok", "deapi"
+
     except Exception as e:
         return "fail", str(e)
